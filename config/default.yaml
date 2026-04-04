@@ -1,0 +1,30 @@
+# 热点自动写作配置
+
+# 搜索配置
+search:
+  sources:
+    - weibo
+    - xiaohongshu
+    - twitter
+    - xueqiu
+    - exa
+  max_results: 10
+
+# 文章生成
+article:
+  count: 2
+  min_word_count: 2500
+  max_word_count: 3500
+  theme: "pie"
+  type: "opinion"
+
+# 飞书通知
+notify:
+  enabled: true
+  channel: "feishu"
+  # webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
+
+# 定时任务
+cron:
+  enabled: true
+  schedule: "0 9 * * *"
