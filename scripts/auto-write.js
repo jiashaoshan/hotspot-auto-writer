@@ -6,7 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 const os = require('os');
 
 // 加载配置文件
@@ -20,7 +20,7 @@ path.expanduser = function(filepath) {
   return filepath;
 };
 
-// 执行命令
+// 执行命令（同步版本）
 function run(cmd, timeout = 60000) {
   try {
     return execSync(cmd, {
@@ -36,6 +36,49 @@ function run(cmd, timeout = 60000) {
     console.error(`      ${e.message}`);
     return null;
   }
+}
+
+// 执行命令（异步版本，用于并行）
+function runAsync(cmd, timeout = 120000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('bash', ['-c', cmd], {
+      env: {
+        ...process.env,
+        PATH: `${process.env.HOME}/.local/bin:${process.env.PATH}`
+      }
+    });
+    
+    let stdout = '';
+    let stderr = '';
+    
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+    
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+    
+    // 超时处理
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`命令超时 (${timeout}ms)`));
+    }, timeout);
+    
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(stderr || `退出码 ${code}`));
+      }
+    });
+    
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
 }
 
 // ===== 步骤1: Agent Reach 全渠道搜索热点 =====
@@ -299,7 +342,7 @@ function confirmWithUser(topics) {
   });
 }
 
-// ===== 步骤3: 调用 wechat-prompt-context 生成文章 =====
+// ===== 步骤3: 调用 wechat-prompt-context 生成文章（并发版）=====
 
 async function generateArticles(topics) {
   console.log('\n📝 步骤3: 调用 wechat-prompt-context 生成文章\n');
@@ -318,15 +361,15 @@ async function generateArticles(topics) {
   }
   
   // 继续生成
-  console.log('\n✅ 继续生成文章...\n');
+  console.log('\n✅ 继续生成文章（并发模式）...\n');
   
   const today = new Date().toISOString().split('T')[0];
   const outputDir = path.join(__dirname, '../output', today);
-  const results = [];
   
-  for (const topic of topics.slice(0, 2)) {
-    console.log(`\n   生成文章 ${topic.rank}: ${topic.title}`);
-    console.log(`   类型: ${topic.articleType} | 主题: pie\n`);
+  // 并发生成两篇文章
+  const generatePromises = topics.slice(0, 2).map(async (topic) => {
+    console.log(`\n   [文章${topic.rank}] 启动生成: ${topic.title}`);
+    console.log(`   [文章${topic.rank}] 类型: ${topic.articleType} | 主题: pie`);
     
     try {
       // 调用 wechat-prompt-context 的 main.js（自动确认模式）
@@ -348,7 +391,7 @@ async function generateArticles(topics) {
       // 执行 wechat-prompt-context 主流程（包含：分析→提示词→确认→生成→发布）
       run(cmd, 600000);  // 10分钟超时
       
-      console.log(`   ✅ wechat-prompt-context 执行完成`);
+      console.log(`   [文章${topic.rank}] ✅ wechat-prompt-context 执行完成`);
       
       // 复制结果到本技能输出目录
       const articleSrc = path.join(wpcPath, 'output/article.md');
@@ -365,7 +408,7 @@ async function generateArticles(topics) {
         
         // 读取文章并更新cover路径为本地路径
         let articleContent = fs.readFileSync(articleSrc, 'utf8');
-        const localCoverPath = coverDst; // 使用绝对路径
+        const localCoverPath = coverDst;
         
         // 替换frontmatter中的cover路径
         articleContent = articleContent.replace(
@@ -376,25 +419,31 @@ async function generateArticles(topics) {
         // 写入更新后的文章
         fs.writeFileSync(articleDst, articleContent, 'utf8');
         
-        console.log(`   ✅ 文章生成完成: ${articleDst}`);
-        console.log(`   ✅ 封面已更新: ${localCoverPath}`);
-        results.push({ rank: topic.rank, title: topic.title, path: articleDst, cover: localCoverPath });
+        console.log(`   [文章${topic.rank}] ✅ 生成完成: ${articleDst}`);
+        return { rank: topic.rank, title: topic.title, path: articleDst, cover: localCoverPath, success: true };
       } else {
-        console.log('   ⚠️ 文章生成失败（可能wechat-prompt-context仍在运行）');
+        console.log(`   [文章${topic.rank}] ⚠️ 文件不存在`);
+        return { rank: topic.rank, title: topic.title, success: false, error: '文件不存在' };
       }
-      
     } catch (e) {
-      console.error(`   ❌ 生成失败: ${e.message}`);
+      console.error(`   [文章${topic.rank}] ❌ 生成失败: ${e.message}`);
+      return { rank: topic.rank, title: topic.title, success: false, error: e.message };
     }
-  }
+  });
+  
+  // 等待所有文章生成完成
+  const results = await Promise.all(generatePromises);
+  const successfulArticles = results.filter(r => r.success);
+  
+  console.log(`\n📊 文章生成结果: ${successfulArticles.length}/${results.length} 成功`);
   
   // 保存结果
   fs.writeFileSync(
     path.join(outputDir, 'articles.json'),
-    JSON.stringify({ date: today, count: results.length, articles: results }, null, 2)
+    JSON.stringify({ date: today, count: successfulArticles.length, articles: successfulArticles }, null, 2)
   );
   
-  return results;
+  return successfulArticles;
 }
 
 // 生成提示词
@@ -459,12 +508,12 @@ ${topic.articleType === 'analysis' ? '- 现象分析\n- 深度剖析\n- 数据�
 </output>`;
 }
 
-// ===== 步骤4: 发布到公众号 =====
+// ===== 步骤4: 发布到公众号（并发版）=====
 
 async function publishArticles(articles) {
-  console.log('\n🚀 步骤4: 发布到公众号草稿箱\n');
+  console.log('\n🚀 步骤4: 发布到公众号草稿箱（并发模式）\n');
   
-  // 查找发布工具（与wechat-prompt-context保持一致）
+  // 查找发布工具
   const mpPublisherPath = path.join(os.homedir(), '.openclaw/workspace/skills/wechat-mp-publisher/scripts/publish.sh');
   const toolkitPath = path.join(os.homedir(), '.openclaw/workspace/skills/wechat-toolkit/scripts/publisher/publish.js');
   
@@ -472,7 +521,7 @@ async function publishArticles(articles) {
   const hasToolkit = fs.existsSync(toolkitPath);
   
   if (hasMpPublisher) {
-    console.log('   使用 wechat-mp-publisher（远程MCP）发布');
+    console.log('   使用 wechat-mp-publisher 发布（已修复）');
   } else if (hasToolkit) {
     console.log('   使用 wechat-toolkit 发布');
   } else {
@@ -480,14 +529,15 @@ async function publishArticles(articles) {
     return;
   }
   
-  for (const article of articles) {
-    console.log(`\n   发布: ${article.title}`);
+  // 并发发布所有文章
+  const publishPromises = articles.map(async (article) => {
+    console.log(`\n   [发布] 开始: ${article.title}`);
     
     try {
       // 先检查文章文件
       if (!fs.existsSync(article.path)) {
-        console.log(`   ⚠️ 文章文件不存在: ${article.path}`);
-        continue;
+        console.log(`   [发布] ⚠️ 文章文件不存在: ${article.path}`);
+        return { success: false, error: '文件不存在' };
       }
       
       // 读取并验证frontmatter
@@ -496,58 +546,57 @@ async function publishArticles(articles) {
       const hasCover = content.match(/^---\s*\n[\s\S]*?cover:\s*["']?[^\n]+["']?/m);
       
       if (!hasTitle) {
-        console.log(`   ⚠️ 文章缺少title字段`);
-        continue;
+        console.log(`   [发布] ⚠️ 文章缺少title字段`);
+        return { success: false, error: '缺少title字段' };
       }
       if (!hasCover) {
-        console.log(`   ⚠️ 文章缺少cover字段`);
-        continue;
+        console.log(`   [发布] ⚠️ 文章缺少cover字段`);
+        return { success: false, error: '缺少cover字段' };
       }
       
-      console.log(`   ✅ Frontmatter验证通过`);
+      console.log(`   [发布] ✅ Frontmatter验证通过`);
       
       // 检查封面图是否存在
       const coverMatch = content.match(/cover:\s*["']?([^\n"']+)["']?/);
       if (coverMatch && !fs.existsSync(coverMatch[1])) {
-        console.log(`   ⚠️ 封面图不存在: ${coverMatch[1]}`);
-        continue;
+        console.log(`   [发布] ⚠️ 封面图不存在: ${coverMatch[1]}`);
+        return { success: false, error: '封面图不存在' };
       }
       
       let cmd;
-      const mpPublisherRemotePath = path.join(os.homedir(), '.openclaw/workspace/skills/wechat-mp-publisher/scripts/publish-remote.sh');
-      const hasRemotePublisher = fs.existsSync(mpPublisherRemotePath);
       
-      if (hasRemotePublisher) {
-        // 使用 wechat-mp-publisher 远程MCP版本（绕过wenyan）
-        cmd = `bash "${mpPublisherRemotePath}" "${article.path}" pie`;
-        console.log(`   → 使用 wechat-mp-publisher 远程MCP 发布...`);
-      } else if (hasMpPublisher) {
-        // 备选：普通 wechat-mp-publisher
-        cmd = `bash "${mpPublisherPath}" "${article.path}"`;
-        console.log(`   → 使用 wechat-mp-publisher 发布...`);
+      // 优先使用 wechat-mp-publisher（已修复-f参数）
+      if (hasMpPublisher) {
+        cmd = `bash "${mpPublisherPath}" "${article.path}" pie`;
+        console.log(`   [发布] → 使用 wechat-mp-publisher...`);
       } else if (hasToolkit) {
-        // 备选 wechat-toolkit
         cmd = `node "${toolkitPath}" "${article.path}" pie`;
-        console.log(`   → 使用 wechat-toolkit 发布...`);
+        console.log(`   [发布] → 使用 wechat-toolkit...`);
       }
       
-      const result = run(cmd, 120000);
+      const result = await runAsync(cmd, 120000);
       
       if (result && (result.includes('发布成功') || result.includes('Media ID') || result.includes('草稿箱'))) {
-        console.log(`   ✅ 发布成功`);
-        console.log(`   ${result.split('\n')[0]}`);
+        console.log(`   [发布] ✅ 成功: ${article.title}`);
+        return { success: true, title: article.title };
       } else if (result && (result.includes('失败') || result.includes('错误'))) {
-        console.log(`   ⚠️ 发布失败: ${result.split('\n')[0]}`);
-        console.log(`   💡 建议：手动复制文章内容到公众号后台发布`);
+        console.log(`   [发布] ⚠️ 失败: ${result.split('\n')[0]}`);
+        return { success: false, error: result.split('\n')[0] };
       } else {
-        console.log(`   ✅ 发布完成`);
-        console.log(`   ${result ? result.split('\n')[0] : '无返回信息'}`);
+        console.log(`   [发布] ✅ 完成: ${article.title}`);
+        return { success: true, title: article.title };
       }
     } catch (e) {
-      console.error(`   ❌ 发布失败: ${e.message}`);
-      console.log(`   💡 建议：手动复制文章内容到公众号后台发布`);
+      console.error(`   [发布] ❌ 失败: ${e.message}`);
+      return { success: false, error: e.message };
     }
-  }
+  });
+  
+  // 等待所有发布完成
+  const results = await Promise.all(publishPromises);
+  const successCount = results.filter(r => r.success).length;
+  
+  console.log(`\n📊 发布结果: ${successCount}/${results.length} 成功`);
 }
 
 // ===== 主函数 =====

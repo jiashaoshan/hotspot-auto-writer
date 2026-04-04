@@ -4,13 +4,17 @@
   "articles": [
     {
       "rank": 1,
-      "title": "这一刻，老戏骨都接不住了：不是演员退步了，是观众'开天眼'了",
-      "path": "/Users/jiashaoshan/.openclaw/workspace/skills/hotspot-auto-writer/output/2026-04-04/article-1.md"
+      "title": "带娃上班：当职场妈妈被迫'公开化'育儿，我们在苛责谁？",
+      "path": "/Users/jiashaoshan/.openclaw/workspace/skills/hotspot-auto-writer/output/2026-04-04/article-1.md",
+      "cover": "/Users/jiashaoshan/.openclaw/workspace/skills/hotspot-auto-writer/output/2026-04-04/cover-1.jpg",
+      "success": true
     },
     {
       "rank": 2,
-      "title": "爱情公寓终于来了：我们怀念的不是剧，是敢做梦的2010年代",
-      "path": "/Users/jiashaoshan/.openclaw/workspace/skills/hotspot-auto-writer/output/2026-04-04/article-2.md"
+      "title": "当愚人节成为情人节：我们在反抗什么，又在妥协什么？",
+      "path": "/Users/jiashaoshan/.openclaw/workspace/skills/hotspot-auto-writer/output/2026-04-04/article-2.md",
+      "cover": "/Users/jiashaoshan/.openclaw/workspace/skills/hotspot-auto-writer/output/2026-04-04/cover-2.jpg",
+      "success": true
     }
   ]
 }
