@@ -1,0 +1,37 @@
+[
+  {
+    "domain": "www.zhihu.com",
+    "name": "q_c1",
+    "value": "ac00d5c20c7f40f3a4878da9535d810b|1773283383000|1773283383000"
+  },
+  {
+    "domain": ".zhihu.com",
+    "name": "edu_user_uuid",
+    "value": "edu-v1|37719826-8a3d-4e68-ad09-16eb623b24f6"
+  },
+  {
+    "domain": ".zhihu.com",
+    "name": "z_c0",
+    "value": "2|1:0|10:1775388340|4:z_c0|92:Mi4xWEI0dEFnQUFBQURxWXhSSE9saTFHeVlBQUFCZ0FsVk50SlNfYWdDOWhiX254T3BBUG9yY05yTTk2N2N1cXY3VzVn|75f99d7ad677240cc3188ac73d49c2c6061bd5b4b2f60079ad56a9a75cb03f9e"
+  },
+  {
+    "domain": "www.zhihu.com",
+    "name": "osd",
+    "value": "U1AXC0NJ1X26gbKyP0DFLOmd23IlF-04iuHR3UV4qwLcw93Tev6TpdqBsbI1sYXPM6LJaidMRaB_or8HaNDmDVg="
+  },
+  {
+    "domain": ".zhihu.com",
+    "name": "_xsrf",
+    "value": "p0lR8cQ0CClSOh2F0epZ6cK8GDcJnytW"
+  },
+  {
+    "domain": "www.zhihu.com",
+    "name": "BEC",
+    "value": "1eb0fb512bb6053f407f0a7771f545e9"
+  },
+  {
+    "domain": "www.zhihu.com",
+    "name": "SESSIONID",
+    "value": "W2O0ijep8wulBfhOUqXia7r9iITW4vOpkHkNXrFet6s"
+  }
+]

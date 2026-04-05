@@ -12,6 +12,24 @@ const os = require('os');
 // 加载配置文件
 const config = require('../config/prompts.js');
 
+// 时间戳工具
+const timings = {};
+function startTimer(name) {
+  timings[name] = Date.now();
+  console.log(`\n⏱️  [${name}] 开始: ${new Date().toLocaleTimeString()}`);
+}
+function endTimer(name) {
+  if (timings[name]) {
+    const duration = ((Date.now() - timings[name]) / 1000).toFixed(1);
+    console.log(`⏱️  [${name}] 结束: ${duration}秒`);
+    return duration;
+  }
+}
+function logStep(step, message) {
+  const time = new Date().toLocaleTimeString();
+  console.log(`[${time}] ${step}: ${message}`);
+}
+
 // 扩展 path
 path.expanduser = function(filepath) {
   if (filepath.startsWith('~/')) {
@@ -81,14 +99,160 @@ function runAsync(cmd, timeout = 120000) {
   });
 }
 
+// 执行命令（简洁版，只输出关键信息）
+function runAsyncWithOutput(cmd, timeout = 120000, prefix = '') {
+  return new Promise((resolve, reject) => {
+    const startTime = Date.now();
+    console.log(`${prefix}⏳ 执行中...`);
+    
+    const child = spawn('bash', ['-c', cmd], {
+      env: {
+        ...process.env,
+        PATH: `${process.env.HOME}/.local/bin:${process.env.PATH}`
+      },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    
+    let stdout = '';
+    let stderr = '';
+    let mediaId = null;
+    
+    child.stdout.on('data', (data) => {
+      const str = data.toString();
+      stdout += str;
+      
+      // 只提取关键信息：Media ID
+      const mediaMatch = str.match(/Media ID:\s*(gY4BuD4J[^\s]+)/);
+      if (mediaMatch && !mediaId) {
+        mediaId = mediaMatch[1];
+        console.log(`${prefix}📝 Media ID: ${mediaId}`);
+      }
+      
+      // 只输出关键状态行
+      if (str.includes('发布成功') || str.includes('✅ 发布成功')) {
+        console.log(`${prefix}✅ 服务器返回成功`);
+      }
+      if (str.includes('❌ 发布失败')) {
+        console.log(`${prefix}❌ 服务器返回失败`);
+      }
+    });
+    
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+    
+    // 超时处理
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`命令超时 (${timeout}ms)`));
+    }, timeout);
+    
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`${prefix}⏱️  耗时: ${duration}秒`);
+      
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(stderr || `退出码 ${code}`));
+      }
+    });
+    
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+// 加载Cookie
+function loadCookiesForCurl(platform) {
+  try {
+    const cookiePath = path.join(__dirname, '../.cookies', `${platform}_cookies.json`);
+    if (!fs.existsSync(cookiePath)) {
+      return '';
+    }
+    const cookies = JSON.parse(fs.readFileSync(cookiePath, 'utf8'));
+    const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    return cookieStr;
+  } catch (e) {
+    return '';
+  }
+}
+
 // ===== 步骤1: Agent Reach 全渠道搜索热点 =====
 
 async function fetchAllHotspots() {
-  console.log('\n🔥 步骤1: Agent Reach 全渠道搜索热点\n');
+  console.log('\n🔥 步骤1: Agent Reach 全渠道搜索热点 (5渠道)\n');
   
   const allHotspots = [];
   
-  // 1. B站热门 (bili-cli)
+  // 1. 微博热门（使用Cookie）
+  console.log('   📱 微博热门...');
+  try {
+    const cookieStr = loadCookiesForCurl('weibo');
+    const cookieHeader = cookieStr ? `-H 'Cookie: ${cookieStr}'` : '';
+    const cmd = `curl -s ${cookieHeader} -H 'User-Agent: Mozilla/5.0' -H 'Referer: https://weibo.com/' 'https://weibo.com/ajax/side/hotSearch' 2>/dev/null`;
+    const result = run(cmd, 15000);
+    
+    if (result && result.includes('hotgov')) {
+      const data = JSON.parse(result);
+      if (data.data?.realtime) {
+        let count = 0;
+        for (const item of data.data.realtime.slice(0, 10)) {
+          if (item.word && count < 8) {
+            allHotspots.push({ 
+              platform: '微博', 
+              title: String(item.word).slice(0, 50), 
+              hot: item.num || (100 - count * 10),
+              category: item.category || '热搜'
+            });
+            count++;
+          }
+        }
+        console.log(`      ✅ ${count} 条`);
+      }
+    } else {
+      console.log('      ⚠️ 无数据或Cookie失效');
+    }
+  } catch (e) { console.log(`      ⚠️ 失败: ${e.message}`); }
+  
+  // 2. 知乎热榜（使用Cookie）
+  console.log('   📚 知乎热榜...');
+  try {
+    const cookieStr = loadCookiesForCurl('zhihu');
+    const cookieHeader = cookieStr ? `-H 'Cookie: ${cookieStr}'` : '';
+    const cmd = `curl -s ${cookieHeader} 'https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=15' 2>/dev/null`;
+    const result = run(cmd, 15000);
+    
+    if (result && result.includes('data')) {
+      const data = JSON.parse(result);
+      if (data.data) {
+        let count = 0;
+        for (const item of data.data.slice(0, 10)) {
+          const target = item.target || {};
+          const title = target.title || target.question?.title;
+          if (title && count < 8) {
+            const hotText = item.detail_text || '';
+            const hot = parseInt(hotText.replace(/[^\d]/g, '')) || (90 - count * 10);
+            allHotspots.push({ 
+              platform: '知乎', 
+              title: String(title).slice(0, 50), 
+              hot,
+              category: '热榜'
+            });
+            count++;
+          }
+        }
+        console.log(`      ✅ ${count} 条`);
+      }
+    } else {
+      console.log('      ⚠️ 无数据或Cookie失效');
+    }
+  } catch (e) { console.log(`      ⚠️ 失败: ${e.message}`); }
+  
+  // 3. B站热门 (bili-cli)
   console.log('   📺 B站热门...');
   try {
     const result = run('bili hot', 30000);
@@ -120,7 +284,7 @@ async function fetchAllHotspots() {
     }
   } catch (e) { console.log('      ⚠️ 失败'); }
 
-  // 2. 小红书热门 - 使用 xhs-cli
+  // 4. 小红书热门 - 使用 xhs-cli
   console.log('   📕 小红书热门...');
   try {
     const result = run('xhs hot 2>/dev/null || xhs feed 2>/dev/null', 30000);
@@ -167,7 +331,7 @@ async function fetchAllHotspots() {
     }
   } catch (e) { console.log('      ⚠️ 失败'); }
   
-  // 3. Twitter 趋势 - 使用 twitter-cli feed
+  // 5. Twitter 趋势 - 使用 twitter-cli feed
   console.log('   🐦 Twitter 趋势...');
   try {
     const result = run('twitter feed -n 10 2>/dev/null', 30000);
@@ -227,24 +391,40 @@ async function fetchAllHotspots() {
 
 // ===== 步骤2: AI 分析选出 Top 2 =====
 
-async function analyzeAndSelect(hotspots) {
-  console.log('\n🤖 步骤2: AI 主编级评估选出 Top 2 话题\n');
-  
-  // 使用配置文件中的提示词模板
-  const promptTemplate = config.topicSelectionPrompt;
-  
-  // 填充热点数据
-  const hotspotsText = hotspots.slice(0, 30).map((h, i) => 
-    `${i + 1}. [${h.platform}] ${h.title} (热度: ${h.hot})`
-  ).join('\n');
-  
-  const prompt = promptTemplate.replace('{{hotspots}}', hotspotsText);
+// 并发评估单个热点
+async function evaluateHotspot(hotspot, index) {
+  const prompt = `你是一位资深公众号主编，拥有10年内容策划经验。
+
+请评估以下热点话题，从5个维度打分（1-10分）：
+1. 深度：话题是否有深层社会/心理/文化意义
+2. 原创性：角度是否新颖，能否避开同质化内容
+3. 读者价值：对目标读者（25-40岁职场人）是否有启发
+4. 时效性：热度持续时间和讨论价值
+5. 安全性：话题是否敏感，有无政策风险
+
+热点：${hotspot.title}
+平台：${hotspot.platform}
+热度：${hotspot.hot}
+
+请严格按以下JSON格式返回，不要有任何其他文字：
+{
+  "score": 总分,
+  "depth": 深度分,
+  "originality": 原创性分,
+  "value": 读者价值分,
+  "timeliness": 时效性分,
+  "safety": 安全性分,
+  "articleType": "analysis/story/opinion/guide之一",
+  "angle": "具体的切入角度（一句话）",
+  "targetAudience": "目标读者群体",
+  "sellingPoint": "核心卖点/金句"
+}`;
 
   try {
-    const cmd = `openclaw agent --agent creator -m '${prompt.replace(/'/g, "'\"'\"'")}' --json --timeout 300`;
-    const result = run(cmd, 300000);
+    const cmd = `openclaw agent --agent creator -m '${prompt.replace(/'/g, "'\"'\"'")}' --json --timeout 120`;
+    const result = run(cmd, 120000);
     
-    if (!result) throw new Error('Agent 调用失败');
+    if (!result) return { hotspot, score: 0, error: '调用失败' };
     
     let response = '';
     try {
@@ -260,43 +440,86 @@ async function analyzeAndSelect(hotspots) {
     
     const cleaned = response.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    const parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(cleaned);
+    const evaluation = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(cleaned);
     
-    const topics = parsed.topics || parsed;
-    console.log(`   ✅ 选出 ${topics.length} 个话题\n`);
-    
-    topics.forEach(t => {
-      console.log(`   ${t.rank}. ${t.title}`);
-      console.log(`      类型: ${t.articleType} | 角度: ${t.angle}`);
-    });
-    
-    // 保存
-    const today = new Date().toISOString().split('T')[0];
-    const outputDir = path.join(__dirname, '../output', today);
-    fs.writeFileSync(
-      path.join(outputDir, 'topics.json'),
-      JSON.stringify({ date: today, topics }, null, 2)
-    );
-    
-    return topics;
+    return {
+      hotspot,
+      index,
+      ...evaluation,
+      error: null
+    };
   } catch (e) {
-    console.error('   ⚠️ AI 分析失败:', e.message);
-    // 返回默认
-    return hotspots.slice(0, 2).map((h, i) => ({
-      rank: i + 1,
-      title: h.title,
-      source: h.platform,
-      angle: '深度分析',
-      articleType: 'opinion',
-      targetAudience: '对话题感兴趣的读者',
-      sellingPoint: h.title,
-      why: '热度较高'
-    }));
+    return { hotspot, score: 0, error: e.message };
   }
 }
 
-// 检查是否自动模式
-const isAutoMode = process.argv.includes('--auto') || process.argv.includes('-a');
+async function analyzeAndSelect(hotspots) {
+  console.log('\n🤖 步骤2: AI 主编级评估选出 Top 2 话题\n');
+  
+  // 取前10个热点（减少评估量，提速）
+  const topHotspots = hotspots.slice(0, 10);
+  console.log(`   评估 ${topHotspots.length} 个热点，并发度: 5\n`);
+  
+  // 并发5个评估
+  const CONCURRENCY = 5;
+  const results = [];
+  
+  for (let i = 0; i < topHotspots.length; i += CONCURRENCY) {
+    const batch = topHotspots.slice(i, i + CONCURRENCY);
+    const batchNum = Math.floor(i / CONCURRENCY) + 1;
+    const totalBatches = Math.ceil(topHotspots.length / CONCURRENCY);
+    
+    console.log(`   批次 ${batchNum}/${totalBatches}: 评估 ${batch.length} 个热点...`);
+    
+    const batchStart = Date.now();
+    const batchPromises = batch.map((h, idx) => evaluateHotspot(h, i + idx));
+    const batchResults = await Promise.all(batchPromises);
+    const batchDuration = ((Date.now() - batchStart) / 1000).toFixed(1);
+    
+    results.push(...batchResults);
+    console.log(`   批次 ${batchNum} 完成 (${batchDuration}秒)\n`);
+  }
+  
+  // 过滤失败项，按分数排序
+  const validResults = results.filter(r => !r.error && r.score > 0);
+  validResults.sort((a, b) => b.score - a.score);
+  
+  // 取前2名
+  const top2 = validResults.slice(0, 2);
+  
+  console.log(`   ✅ 选出 ${top2.length} 个话题\n`);
+  
+  const topics = top2.map((r, i) => ({
+    rank: i + 1,
+    title: r.hotspot.title,
+    source: r.hotspot.platform,
+    articleType: r.articleType || 'analysis',
+    angle: r.angle || '深度分析',
+    targetAudience: r.targetAudience || '25-40岁职场人',
+    sellingPoint: r.sellingPoint || r.hotspot.title,
+    why: `总分${r.score} (深度${r.depth}+原创${r.originality}+价值${r.value}+时效${r.timeliness}+安全${r.safety})`,
+    score: r.score
+  }));
+  
+  topics.forEach(t => {
+    console.log(`   ${t.rank}. ${t.title}`);
+    console.log(`      类型: ${t.articleType} | 分数: ${t.score}`);
+    console.log(`      角度: ${t.angle}`);
+  });
+  
+  // 保存
+  const today = new Date().toISOString().split('T')[0];
+  const outputDir = path.join(__dirname, '../output', today);
+  fs.writeFileSync(
+    path.join(outputDir, 'topics.json'),
+    JSON.stringify({ date: today, topics }, null, 2)
+  );
+  
+  return topics;
+}
+
+// 检查是否自动模式（全局变量）
+const isAutoMode = process.argv.includes('--auto') || process.argv.includes('-a') || process.argv.includes('--auto-confirm');
 
 // 交互式确认
 function confirmWithUser(topics) {
@@ -342,7 +565,7 @@ function confirmWithUser(topics) {
   });
 }
 
-// ===== 步骤3: 调用 wechat-prompt-context 生成文章（并发版）=====
+// ===== 步骤3: 调用 wechat-prompt-context 生成文章（并行版 - 临时目录隔离）=====
 
 async function generateArticles(topics) {
   console.log('\n📝 步骤3: 调用 wechat-prompt-context 生成文章\n');
@@ -361,41 +584,193 @@ async function generateArticles(topics) {
   }
   
   // 继续生成
-  console.log('\n✅ 继续生成文章（并发模式）...\n');
+  console.log('\n✅ 继续生成文章（并行模式 - 临时目录隔离）...\n');
   
   const today = new Date().toISOString().split('T')[0];
   const outputDir = path.join(__dirname, '../output', today);
   
-  // 并发生成两篇文章
+  // 并发生成文章（每篇在独立临时目录，避免冲突）
   const generatePromises = topics.slice(0, 2).map(async (topic) => {
+    const articleStart = Date.now();
     console.log(`\n   [文章${topic.rank}] 启动生成: ${topic.title}`);
     console.log(`   [文章${topic.rank}] 类型: ${topic.articleType} | 主题: pie`);
     
+    // 创建临时目录
+    const tmpDir = path.join(os.tmpdir(), `wpc-${topic.rank}-${Date.now()}`);
+    const wpcSourcePath = path.expanduser('~/.openclaw/workspace/skills/wechat-prompt-context');
+    
     try {
-      // 调用 wechat-prompt-context 的 main.js（自动确认模式）
-      const wpcPath = path.expanduser('~/.openclaw/workspace/skills/wechat-prompt-context');
+      // 1. 创建临时目录并复制技能文件
+      const step1Start = Date.now();
+      console.log(`   [文章${topic.rank}] → 创建临时目录: ${tmpDir}`);
+      fs.mkdirSync(tmpDir, { recursive: true });
       
-      // 全自动模式：使用 --auto-confirm 参数
-      const isAutoMode = process.argv.includes('--auto') || process.argv.includes('-a');
-      const autoConfirmFlag = isAutoMode ? ' --auto-confirm' : '';
+      // 复制关键文件（不复制整个目录，节省时间）
+      fs.mkdirSync(path.join(tmpDir, 'scripts'), { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, 'config'), { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, 'output'), { recursive: true });
       
-      const cmd = `cd "${wpcPath}" && node scripts/main.js --topic="${topic.title}" --theme=pie${autoConfirmFlag}`;
+      // 复制 node_modules/js-yaml（必需依赖）- 使用 require.resolve 找到实际路径
+      const nodeModulesDir = path.join(tmpDir, 'node_modules');
+      fs.mkdirSync(nodeModulesDir, { recursive: true });
       
-      console.log('   → 启动 wechat-prompt-context...');
-      if (isAutoMode) {
-        console.log('   🤖 自动模式：跳过提示词确认，直接生成文章\n');
-      } else {
-        console.log('   ⚠️ 手动模式：请在提示词确认环节输入 "yes"\n');
+      // 找到 js-yaml 的实际安装位置
+      let jsYamlSrc;
+      try {
+        jsYamlSrc = path.dirname(require.resolve('js-yaml', { paths: [wpcSourcePath, process.cwd(), path.join(os.homedir(), '.openclaw/workspace')] }));
+      } catch (e) {
+        // 备用方案：直接找 workspace 根目录
+        jsYamlSrc = path.join(os.homedir(), '.openclaw/workspace/node_modules/js-yaml');
       }
       
-      // 执行 wechat-prompt-context 主流程（包含：分析→提示词→确认→生成→发布）
-      run(cmd, 600000);  // 10分钟超时
+      const jsYamlDst = path.join(nodeModulesDir, 'js-yaml');
+      if (fs.existsSync(jsYamlSrc)) {
+        console.log(`   [文章${topic.rank}]   → 复制 js-yaml from ${jsYamlSrc}...`);
+        fs.cpSync(jsYamlSrc, jsYamlDst, { recursive: true, force: true });
+        
+        // 复制 argparse（js-yaml 的依赖）
+        let argparseSrc;
+        try {
+          argparseSrc = path.dirname(require.resolve('argparse', { paths: [wpcSourcePath, process.cwd(), path.join(os.homedir(), '.openclaw/workspace')] }));
+        } catch (e) {
+          argparseSrc = path.join(os.homedir(), '.openclaw/workspace/node_modules/argparse');
+        }
+        const argparseDst = path.join(nodeModulesDir, 'argparse');
+        if (fs.existsSync(argparseSrc)) {
+          fs.cpSync(argparseSrc, argparseDst, { recursive: true, force: true });
+          console.log(`   [文章${topic.rank}]   ✅ argparse 复制完成`);
+        }
+        
+        // 创建 .package.json 使 require 工作
+        fs.writeFileSync(
+          path.join(nodeModulesDir, 'js-yaml/package.json'),
+          JSON.stringify({ name: 'js-yaml', main: './index.js' }, null, 2)
+        );
+        
+        console.log(`   [文章${topic.rank}]   ✅ 依赖复制完成`);
+      } else {
+        console.log(`   [文章${topic.rank}]   ⚠️ 未找到 js-yaml，将尝试全局安装`);
+        // 备用：直接 npm install
+        execSync('npm install js-yaml argparse --silent', { cwd: tmpDir, stdio: 'ignore' });
+      }
       
-      console.log(`   [文章${topic.rank}] ✅ wechat-prompt-context 执行完成`);
+      // 创建 wai-scripts 目录并复制 wechat-ai-writer 依赖
+      const waiScriptsDir = path.join(tmpDir, 'scripts', 'wai-scripts');
+      fs.mkdirSync(waiScriptsDir, { recursive: true });
+      const waiSourcePath = path.expanduser('~/.openclaw/workspace/skills/wechat-ai-writer');
+      const waiScripts = ['generate-cover.js', 'llm-client.js', 'doubao-image.js', 'pexels-image.js'];
+      for (const script of waiScripts) {
+        const src = path.join(waiSourcePath, 'scripts', script);
+        const dst = path.join(waiScriptsDir, script);
+        if (fs.existsSync(src)) {
+          fs.copyFileSync(src, dst);
+        }
+      }
+      console.log(`   [文章${topic.rank}]   ✅ wai-scripts 复制完成`);
       
-      // 复制结果到本技能输出目录
-      const articleSrc = path.join(wpcPath, 'output/article.md');
-      const coverSrc = path.join(wpcPath, 'output/cover.jpg');
+      // 复制脚本文件
+      const scriptsToCopy = ['main.js', 'analyze-topic.js', 'generate-prompt.js', 'confirm-prompt.js', 'write-article.js', 'publish.js', 'extract-prompt.js'];
+      for (const script of scriptsToCopy) {
+        const src = path.join(wpcSourcePath, 'scripts', script);
+        const dst = path.join(tmpDir, 'scripts', script);
+        if (fs.existsSync(src)) {
+          let content = fs.readFileSync(src, 'utf8');
+          
+          // 修复 write-article.js 中的相对路径引用
+          if (script === 'write-article.js') {
+            content = content.replace(
+              /require\(['"]\.\.\/\.\.\/wechat-ai-writer\/scripts\//g,
+              "require('./wai-scripts/"
+            );
+            console.log(`   [文章${topic.rank}]   → 修复 write-article.js 路径引用`);
+          }
+          
+          fs.writeFileSync(dst, content, 'utf8');
+        }
+      }
+      
+      // 复制配置文件
+      if (fs.existsSync(path.join(wpcSourcePath, 'config', 'default.yaml'))) {
+        fs.copyFileSync(
+          path.join(wpcSourcePath, 'config', 'default.yaml'),
+          path.join(tmpDir, 'config', 'default.yaml')
+        );
+      }
+      
+      // 复制 prompts 目录（包含模板文件）
+      if (fs.existsSync(path.join(wpcSourcePath, 'prompts'))) {
+        fs.mkdirSync(path.join(tmpDir, 'prompts'), { recursive: true });
+        const promptsItems = fs.readdirSync(path.join(wpcSourcePath, 'prompts'));
+        for (const item of promptsItems) {
+          const srcPath = path.join(wpcSourcePath, 'prompts', item);
+          const dstPath = path.join(tmpDir, 'prompts', item);
+          const stat = fs.statSync(srcPath);
+          if (stat.isDirectory()) {
+            fs.cpSync(srcPath, dstPath, { recursive: true, force: true });
+            console.log(`   [文章${topic.rank}]   → 复制 prompts/${item}/...`);
+          } else {
+            fs.copyFileSync(srcPath, dstPath);
+          }
+        }
+        console.log(`   [文章${topic.rank}]   ✅ prompts 复制完成`);
+      }
+      
+      // 复制模板
+      if (fs.existsSync(path.join(wpcSourcePath, 'templates'))) {
+        fs.mkdirSync(path.join(tmpDir, 'templates'), { recursive: true });
+        const templates = fs.readdirSync(path.join(wpcSourcePath, 'templates'));
+        for (const t of templates) {
+          fs.copyFileSync(
+            path.join(wpcSourcePath, 'templates', t),
+            path.join(tmpDir, 'templates', t)
+          );
+        }
+      }
+      
+      // 复制 assets
+      if (fs.existsSync(path.join(wpcSourcePath, 'assets'))) {
+        fs.mkdirSync(path.join(tmpDir, 'assets'), { recursive: true });
+        const assets = fs.readdirSync(path.join(wpcSourcePath, 'assets'));
+        for (const a of assets) {
+          fs.copyFileSync(
+            path.join(wpcSourcePath, 'assets', a),
+            path.join(tmpDir, 'assets', a)
+          );
+        }
+      }
+      
+      // 创建 package.json 使模块系统正常工作
+      const packageJson = {
+        name: "wpc-temp",
+        version: "1.0.0",
+        private: true
+      };
+      fs.writeFileSync(
+        path.join(tmpDir, 'package.json'),
+        JSON.stringify(packageJson, null, 2)
+      );
+      
+      // 2. 在临时目录执行生成
+      const autoConfirmFlag = isAutoMode ? ' --auto-confirm' : '';
+      const cmd = `cd "${tmpDir}" && node scripts/main.js --topic="${topic.title}" --theme=pie${autoConfirmFlag}`;
+      
+      console.log(`   [文章${topic.rank}] → 启动 wechat-prompt-context（临时目录）...`);
+      if (isAutoMode) {
+        console.log(`   [文章${topic.rank}] 🤖 自动模式：跳过提示词确认`);
+      }
+      
+      const genStart = Date.now();
+      await runAsync(cmd, 600000);  // 10分钟超时
+      const genDuration = ((Date.now() - genStart) / 1000).toFixed(1);
+      console.log(`   [文章${topic.rank}] ✅ wechat-prompt-context 执行完成 (${genDuration}秒)`);
+      
+      // 3. 从临时目录复制结果
+      const articleSrc = path.join(tmpDir, 'output/article.md');
+      // 封面可能在 output/ 或 scripts/output/ 目录下
+      let coverSrc = path.join(tmpDir, 'output/cover.jpg');
+      if (!fs.existsSync(coverSrc)) {
+        coverSrc = path.join(tmpDir, 'scripts/output/cover.jpg');
+      }
       
       if (fs.existsSync(articleSrc)) {
         const articleDst = path.join(outputDir, `article-${topic.rank}.md`);
@@ -420,6 +795,15 @@ async function generateArticles(topics) {
         fs.writeFileSync(articleDst, articleContent, 'utf8');
         
         console.log(`   [文章${topic.rank}] ✅ 生成完成: ${articleDst}`);
+        
+        // 4. 清理临时目录
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+          console.log(`   [文章${topic.rank}] 🧹 临时目录已清理`);
+        } catch (e) {
+          console.log(`   [文章${topic.rank}] ⚠️ 清理临时目录失败: ${e.message}`);
+        }
+        
         return { rank: topic.rank, title: topic.title, path: articleDst, cover: localCoverPath, success: true };
       } else {
         console.log(`   [文章${topic.rank}] ⚠️ 文件不存在`);
@@ -427,6 +811,10 @@ async function generateArticles(topics) {
       }
     } catch (e) {
       console.error(`   [文章${topic.rank}] ❌ 生成失败: ${e.message}`);
+      // 清理临时目录
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {}
       return { rank: topic.rank, title: topic.title, success: false, error: e.message };
     }
   });
@@ -435,7 +823,7 @@ async function generateArticles(topics) {
   const results = await Promise.all(generatePromises);
   const successfulArticles = results.filter(r => r.success);
   
-  console.log(`\n📊 文章生成结果: ${successfulArticles.length}/${results.length} 成功`);
+  console.log(`\n📊 文章生成结果: ${successfulArticles.length}/${results.length} 成功（并行完成）`);
   
   // 保存结果
   fs.writeFileSync(
@@ -508,10 +896,10 @@ ${topic.articleType === 'analysis' ? '- 现象分析\n- 深度剖析\n- 数据�
 </output>`;
 }
 
-// ===== 步骤4: 发布到公众号（并发版）=====
+// ===== 步骤4: 发布到公众号（并行版）=====
 
 async function publishArticles(articles) {
-  console.log('\n🚀 步骤4: 发布到公众号草稿箱（并发模式）\n');
+  console.log('\n🚀 步骤4: 发布到公众号草稿箱（串行模式 - 实时输出）\n');
   
   // 查找发布工具
   const mpPublisherPath = path.join(os.homedir(), '.openclaw/workspace/skills/wechat-mp-publisher/scripts/publish.sh');
@@ -529,74 +917,109 @@ async function publishArticles(articles) {
     return;
   }
   
-  // 并发发布所有文章
-  const publishPromises = articles.map(async (article) => {
-    console.log(`\n   [发布] 开始: ${article.title}`);
+  // 串行发布文章（避免API限流和输出混淆）
+  const results = [];
+  for (let i = 0; i < articles.length; i++) {
+    const article = articles[i];
+    console.log(`\n   [发布${article.rank}] (${i+1}/${articles.length}) ${article.title}`);
     
     try {
-      // 先检查文章文件
+      // 步骤1: 检查文章文件
+      console.log(`   [发布${article.rank}] 步骤1/4: 检查文章文件...`);
       if (!fs.existsSync(article.path)) {
-        console.log(`   [发布] ⚠️ 文章文件不存在: ${article.path}`);
-        return { success: false, error: '文件不存在' };
+        console.log(`   [发布${article.rank}] ❌ 文章文件不存在`);
+        results.push({ success: false, error: '文件不存在' });
+        continue;
       }
+      console.log(`   [发布${article.rank}] ✅ 文件存在`);
       
-      // 读取并验证frontmatter
+      // 步骤2: 验证frontmatter
+      console.log(`   [发布${article.rank}] 步骤2/4: 验证Frontmatter...`);
       const content = fs.readFileSync(article.path, 'utf8');
       const hasTitle = content.match(/^---\s*\n[\s\S]*?title:\s*["']?[^\n]+["']?/m);
       const hasCover = content.match(/^---\s*\n[\s\S]*?cover:\s*["']?[^\n]+["']?/m);
       
-      if (!hasTitle) {
-        console.log(`   [发布] ⚠️ 文章缺少title字段`);
-        return { success: false, error: '缺少title字段' };
+      if (!hasTitle || !hasCover) {
+        console.log(`   [发布${article.rank}] ❌ 缺少title或cover字段`);
+        results.push({ success: false, error: 'Frontmatter不完整' });
+        continue;
       }
-      if (!hasCover) {
-        console.log(`   [发布] ⚠️ 文章缺少cover字段`);
-        return { success: false, error: '缺少cover字段' };
-      }
+      console.log(`   [发布${article.rank}] ✅ Frontmatter完整`);
       
-      console.log(`   [发布] ✅ Frontmatter验证通过`);
-      
-      // 检查封面图是否存在
+      // 步骤3: 检查封面图
+      console.log(`   [发布${article.rank}] 步骤3/4: 检查封面图...`);
       const coverMatch = content.match(/cover:\s*["']?([^\n"']+)["']?/);
       if (coverMatch && !fs.existsSync(coverMatch[1])) {
-        console.log(`   [发布] ⚠️ 封面图不存在: ${coverMatch[1]}`);
-        return { success: false, error: '封面图不存在' };
+        console.log(`   [发布${article.rank}] ❌ 封面图不存在`);
+        results.push({ success: false, error: '封面图不存在' });
+        continue;
       }
+      console.log(`   [发布${article.rank}] ✅ 封面图存在`);
       
+      // 步骤4: 执行发布
+      console.log(`   [发布${article.rank}] 步骤4/4: 调用发布API...`);
       let cmd;
-      
-      // 优先使用 wechat-mp-publisher（已修复-f参数）
       if (hasMpPublisher) {
         cmd = `bash "${mpPublisherPath}" "${article.path}" pie`;
-        console.log(`   [发布] → 使用 wechat-mp-publisher...`);
       } else if (hasToolkit) {
         cmd = `node "${toolkitPath}" "${article.path}" pie`;
-        console.log(`   [发布] → 使用 wechat-toolkit...`);
       }
       
-      const result = await runAsync(cmd, 120000);
+      const pubStart = Date.now();
+      const result = await runAsyncWithOutput(cmd, 300000, `   [发布${article.rank}] `);
+      const pubDuration = ((Date.now() - pubStart) / 1000).toFixed(1);
+      console.log(`   [发布${article.rank}] ⏱️ 发布耗时: ${pubDuration}秒`);
       
-      if (result && (result.includes('发布成功') || result.includes('Media ID') || result.includes('草稿箱'))) {
-        console.log(`   [发布] ✅ 成功: ${article.title}`);
-        return { success: true, title: article.title };
-      } else if (result && (result.includes('失败') || result.includes('错误'))) {
-        console.log(`   [发布] ⚠️ 失败: ${result.split('\n')[0]}`);
-        return { success: false, error: result.split('\n')[0] };
+      if (result && (result.includes('发布成功') || result.includes('Media ID'))) {
+        console.log(`   [发布${article.rank}] ✅ 发布成功`);
+        results.push({ success: true, title: article.title });
       } else {
-        console.log(`   [发布] ✅ 完成: ${article.title}`);
-        return { success: true, title: article.title };
+        console.log(`   [发布${article.rank}] ⚠️ 状态未知，请检查草稿箱`);
+        results.push({ success: true, title: article.title });
+      }
+      
+      // 发布间隔
+      if (i < articles.length - 1) {
+        console.log('   ⏳ 等待5秒...');
+        await new Promise(r => setTimeout(r, 5000));
       }
     } catch (e) {
-      console.error(`   [发布] ❌ 失败: ${e.message}`);
-      return { success: false, error: e.message };
+      console.error(`   [发布${article.rank}] ❌ 异常: ${e.message}`);
+      results.push({ success: false, error: e.message });
     }
-  });
+  }
   
-  // 等待所有发布完成
-  const results = await Promise.all(publishPromises);
   const successCount = results.filter(r => r.success).length;
   
   console.log(`\n📊 发布结果: ${successCount}/${results.length} 成功`);
+}
+
+// 检查 Playwright 是否安装
+function checkPlaywright() {
+  try {
+    execSync('npx playwright --version', { stdio: 'ignore' });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 自动安装 Playwright
+async function installPlaywright() {
+  console.log('🔧 正在安装 Playwright Chromium 浏览器...');
+  console.log('   这可能需要几分钟时间...\n');
+  try {
+    execSync('npx playwright install chromium', { 
+      stdio: 'inherit',
+      timeout: 300000 // 5分钟超时
+    });
+    console.log('   ✅ Playwright 安装完成\n');
+    return true;
+  } catch (e) {
+    console.error('   ❌ Playwright 安装失败:', e.message);
+    console.log('   ⚠️  部分功能（如封面生成）可能无法正常工作\n');
+    return false;
+  }
 }
 
 // ===== 主函数 =====
@@ -606,25 +1029,42 @@ async function main() {
   console.log('🔥 热点自动写作 (全自动版)');
   console.log('='.repeat(60));
   
-  const startTime = Date.now();
+  const totalStart = Date.now();
+  
+  // 检查并自动安装 Playwright
+  if (!checkPlaywright()) {
+    console.log('\n⚠️ 警告: Playwright 未安装或浏览器未下载');
+    const installed = await installPlaywright();
+    if (!installed) {
+      console.log('   继续执行（封面生成可能失败）...\n');
+    }
+  }
   
   // 步骤1: 搜索
+  startTimer('步骤1-热点搜索');
   const hotspots = await fetchAllHotspots();
+  endTimer('步骤1-热点搜索');
   
   // 步骤2: 分析
+  startTimer('步骤2-AI分析');
   const topics = await analyzeAndSelect(hotspots);
+  endTimer('步骤2-AI分析');
   
   // 步骤3: 生成文章
+  startTimer('步骤3-文章生成(并行)');
   const articles = await generateArticles(topics);
+  endTimer('步骤3-文章生成(并行)');
   
   // 步骤4: 发布
   if (articles.length > 0) {
+    startTimer('步骤4-发布(串行)');
     await publishArticles(articles);
+    endTimer('步骤4-发布(串行)');
   }
   
-  const duration = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
+  const totalDuration = ((Date.now() - totalStart) / 1000 / 60).toFixed(1);
   console.log('\n' + '='.repeat(60));
-  console.log(`✅ 完成！耗时 ${duration} 分钟`);
+  console.log(`✅ 完成！总耗时 ${totalDuration} 分钟`);
   console.log(`📊 生成 ${articles.length} 篇文章`);
   console.log('='.repeat(60) + '\n');
 }
