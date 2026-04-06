@@ -30,13 +30,28 @@ function logStep(step, message) {
   console.log(`[${time}] ${step}: ${message}`);
 }
 
-// 扩展 path
-path.expanduser = function(filepath) {
+// 在目录中查找封面图片（支持多种文件名）
+function findCoverInDir(dir) {
+  if (!fs.existsSync(dir)) return null;
+  const files = fs.readdirSync(dir);
+  // 优先找 cover-*.jpg，其次 cover_pexels_*.jpg，最后 cover.jpg
+  const coverPatterns = [f => f.startsWith('cover-') && f.endsWith('.jpg'), f => f.startsWith('cover_pexels_') && f.endsWith('.jpg'), f => f === 'cover.jpg'];
+  for (const pattern of coverPatterns) {
+    const found = files.find(pattern);
+    if (found) return path.join(dir, found);
+  }
+  // 兜底：找任何 .jpg 文件
+  const jpg = files.find(f => f.endsWith('.jpg'));
+  return jpg ? path.join(dir, jpg) : null;
+}
+
+// 修复 TDZ 问题：使用独立函数替代修改原生 path
+function expandUser(filepath) {
   if (filepath.startsWith('~/')) {
     return path.join(os.homedir(), filepath.slice(2));
   }
   return filepath;
-};
+}
 
 // 执行命令（同步版本）
 function run(cmd, timeout = 60000) {
@@ -422,7 +437,7 @@ async function evaluateHotspot(hotspot, index) {
 
   try {
     const cmd = `openclaw agent --agent creator -m '${prompt.replace(/'/g, "'\"'\"'")}' --json --timeout 120`;
-    const result = run(cmd, 120000);
+    const result = await runAsync(cmd, 120000);
     
     if (!result) return { hotspot, score: 0, error: '调用失败' };
     
@@ -461,7 +476,7 @@ async function analyzeAndSelect(hotspots) {
   console.log(`   评估 ${topHotspots.length} 个热点，并发度: 5\n`);
   
   // 并发5个评估
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 3;  // 修复：降低并发度避免阻塞
   const results = [];
   
   for (let i = 0; i < topHotspots.length; i += CONCURRENCY) {
@@ -597,7 +612,7 @@ async function generateArticles(topics) {
     
     // 创建临时目录
     const tmpDir = path.join(os.tmpdir(), `wpc-${topic.rank}-${Date.now()}`);
-    const wpcSourcePath = path.expanduser('~/.openclaw/workspace/skills/wechat-prompt-context');
+    const wpcSourcePath = expandUser('~/.openclaw/workspace/skills/wechat-prompt-context');
     
     try {
       // 1. 创建临时目录并复制技能文件
@@ -657,7 +672,7 @@ async function generateArticles(topics) {
       // 创建 wai-scripts 目录并复制 wechat-ai-writer 依赖
       const waiScriptsDir = path.join(tmpDir, 'scripts', 'wai-scripts');
       fs.mkdirSync(waiScriptsDir, { recursive: true });
-      const waiSourcePath = path.expanduser('~/.openclaw/workspace/skills/wechat-ai-writer');
+      const waiSourcePath = expandUser('~/.openclaw/workspace/skills/wechat-ai-writer');
       const waiScripts = ['generate-cover.js', 'llm-client.js', 'doubao-image.js', 'pexels-image.js'];
       for (const script of waiScripts) {
         const src = path.join(waiSourcePath, 'scripts', script);
@@ -684,6 +699,9 @@ async function generateArticles(topics) {
             );
             console.log(`   [文章${topic.rank}]   → 修复 write-article.js 路径引用`);
           }
+          
+          // 源文件应该已经被修复，这里只是确保
+          // 不再自动添加 expandUser 函数，避免破坏文件格式
           
           fs.writeFileSync(dst, content, 'utf8');
         }
@@ -739,6 +757,13 @@ async function generateArticles(topics) {
         }
       }
       
+      // 复制 .env 文件（API Keys）到临时目录
+      const workspaceEnvPath = expandUser('~/.openclaw/workspace/.env');
+      if (fs.existsSync(workspaceEnvPath)) {
+        fs.copyFileSync(workspaceEnvPath, path.join(tmpDir, '.env'));
+        console.log(`   [文章${topic.rank}]   ✅ .env (API Keys) 复制完成`);
+      }
+      
       // 创建 package.json 使模块系统正常工作
       const packageJson = {
         name: "wpc-temp",
@@ -766,11 +791,13 @@ async function generateArticles(topics) {
       
       // 3. 从临时目录复制结果
       const articleSrc = path.join(tmpDir, 'output/article.md');
-      // 封面可能在 output/ 或 scripts/output/ 目录下
-      let coverSrc = path.join(tmpDir, 'output/cover.jpg');
-      if (!fs.existsSync(coverSrc)) {
-        coverSrc = path.join(tmpDir, 'scripts/output/cover.jpg');
+      // 封面可能在 output/ 或 scripts/output/ 目录下，文件名可能是 cover.jpg 或 cover_pexels_*.jpg
+      let coverSrc = findCoverInDir(path.join(tmpDir, 'output'));
+      if (!coverSrc) {
+        coverSrc = findCoverInDir(path.join(tmpDir, 'scripts', 'output'));
       }
+      console.log(`   [文章${topic.rank}]   🔍 封面查找: output/=${findCoverInDir(path.join(tmpDir, 'output')) || '无'}, scripts/output/=${findCoverInDir(path.join(tmpDir, 'scripts', 'output')) || '无'}`);
+      console.log(`   [文章${topic.rank}]   📌 最终封面源: ${coverSrc || '未找到'}`);
       
       if (fs.existsSync(articleSrc)) {
         const articleDst = path.join(outputDir, `article-${topic.rank}.md`);
@@ -966,7 +993,7 @@ async function publishArticles(articles) {
       }
       
       const pubStart = Date.now();
-      const result = await runAsyncWithOutput(cmd, 300000, `   [发布${article.rank}] `);
+      const result = await runAsyncWithOutput(cmd, 600000, `   [发布${article.rank}] `);
       const pubDuration = ((Date.now() - pubStart) / 1000).toFixed(1);
       console.log(`   [发布${article.rank}] ⏱️ 发布耗时: ${pubDuration}秒`);
       
