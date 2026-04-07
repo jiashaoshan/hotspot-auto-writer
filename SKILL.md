@@ -1,53 +1,51 @@
 ---
 name: hotspot-auto-writer
-description: "每日热点自动写作：Agent Reach全渠道搜索 → AI分析 → wechat-prompt-context生成 → 自动发布"
-version: "2.0.0"
+description: "每日热点自动写作：Agent Reach全渠道搜索 → AI分析 → 笔杆子agent生成 → 自动发布"
+version: "2.2.0"
 metadata:
   openclaw:
     emoji: "🔥"
     requires:
-      skills: ["agent-reach", "wechat-prompt-context", "wechat-toolkit"]
+      skills: ["agent-reach", "wechat-prompt-context", "wechat-mp-publisher"]
     cron: "0 9 * * *"
 ---
 
 # 🔥 热点自动写作技能 (全自动版)
 
-**全自动工作流程**：每天定时搜索全网热点 → AI分析选出话题 → 调用wechat-prompt-context生成文章 → 发布到公众号草稿箱。
+每天定时搜索全网热点 → AI 主编级评估 → 笔杆子 agent 创作 → 自动发布到公众号草稿箱。
 
-## 工作流程 (全自动)
+## 工作流
 
 ```
 9:00 定时触发
     ↓
-步骤1: Agent Reach 全渠道搜索 (5大平台)
-    ├── 微博热搜 (weibo) - Cookie登录
-    ├── 知乎热榜 (zhihu) - Cookie登录
-    ├── 小红书热门 (xiaohongshu)
-    ├── B站热门 (bilibili)
-    └── Twitter 趋势 (twitter)
-    ↓
-步骤2: AI 智能分析 (并发5个评估)
-    ├── 聚合所有渠道热点 (约40-50条)
-    ├── 评估5维度 (深度/原创性/价值/时效/安全)
-    └── 选出 Top 2 最适合公众号的话题
-    ↓
-步骤3: 并发生成文章 (2篇同时)
-    ├── 调用 wechat-prompt-context
-    ├── 独立临时目录 (避免冲突)
-    ├── LLM撰写文章 (2500-3000字)
-    └── Pexels封面图 (优先) / 豆包生成 (备选)
-    ↓
-步骤4: 串行发布 (避免API限流)
-    ├── 发布文章1到公众号草稿箱
-    ├── 等待5秒
-    └── 发布文章2到公众号草稿箱
-    ↓
-步骤5: 清理与通知
-    ├── 清理临时目录
-    └── 发送完成通知
+步骤1: Agent Reach 全渠道搜索 (5 平台)
+    ├── 微博热搜 (Cookie 登录)
+    ├── 知乎热榜 (Cookie 登录)
+    ├── B站热门
+    ├── 小红书热门
+    └── Twitter 趋势
+    ↓ (~20 秒，聚合 ~38 条)
+步骤2: AI 主编级评估 (5 维打分)
+    ├── 深度 + 原创 + 价值 + 时效 + 安全
+    ├── 并发 5 个/批，3 批完成
+    └─ 输出: Top 2 话题
+    ↓ (~4.5 分钟)
+步骤3: 并行生成文章 (工作进程模式)
+    ├── Worker 1: 临时目录 A → 笔杆子 agent
+    ├── Worker 2: 临时目录 B → 笔杆子 agent
+    ├── 每篇: 封面 + 文章 + 内容校验
+    └─ 输出: article-1.md + cover-1.jpg
+    ↓ (~3.3 分钟)
+步骤4: 串行发布 (避免 API 限流)
+    ├── 校验 Frontmatter + 字数 + 编码
+    ├── 封面自动压缩
+    └── wenyan-cli publish → 微信草稿箱
+    ↓ (~8 秒)
+完成: 2 篇文章发布到草稿箱 (总耗时 ~8 分钟)
 ```
 
-## 已配置渠道 (5大平台)
+## 已配置渠道
 
 | 渠道 | 平台 | 搜索内容 | 状态 | Cookie |
 |------|------|----------|------|--------|
@@ -60,80 +58,103 @@ metadata:
 ## 使用方法
 
 ### 手动执行
-```bash
-# 一键全自动执行
-node ~/.openclaw/workspace/skills/hotspot-auto-writer/scripts/auto-write.js
 
-# 或调用主入口
-node ~/.openclaw/workspace/skills/hotspot-auto-writer/scripts/main.js
+```bash
+# 全自动（跳过确认）
+node ~/.openclaw/workspace/skills/hotspot-auto-writer/scripts/auto-write.js --auto
+
+# 手动模式（逐步确认）
+node ~/.openclaw/workspace/skills/hotspot-auto-writer/scripts/auto-write.js
 ```
 
 ### 定时执行
+
 ```bash
-# 安装定时任务（每天9点自动执行）
+# 安装定时任务（每天 9 点）
 bash ~/.openclaw/workspace/skills/hotspot-auto-writer/cron/install.sh
 
 # 查看日志
 tail -f ~/.openclaw/logs/hotspot-auto-writer.log
 ```
 
+## 架构设计
+
+### 核心文件
+
+| 文件 | 功能 |
+|------|------|
+| `scripts/auto-write.js` | 主流程编排器 |
+| `scripts/generate-article-worker.js` | 文章生成工作进程（资源隔离） |
+| `scripts/test-agent-write.js` | 端到端测试脚本 |
+| `config/prompts.js` | 5 维评估框架配置 |
+
+### 关键设计
+
+| 决策 | 方案 | 原因 |
+|------|------|------|
+| 文章生成 | `openclaw agent --agent creator` | 利用 agent 框架级模型管理 |
+| 并行架构 | 独立工作进程 + 临时目录 | 避免 OOM SIGKILL |
+| 发布策略 | 串行发布 | 避免微信 API 限流 |
+| 封面策略 | Pexels 优先 → 豆包备选 | 真实图片质量更高 |
+| 内容校验 | 双阶段拦截 | 不完整文章不发布 |
+| 幂等保护 | MD5 指纹 + 30 分钟窗口 | 防止重复发布 |
+| 思考过滤 | `filterAgentOutput()` | 过滤 agent 英文 planning |
+
 ## 输出结构
 
 ```
 output/YYYY-MM-DD/
-├── hotspots.json          # 搜索到的所有热点
-├── topics.json            # AI选出的Top 2话题
-├── article-1.md           # 文章1
-├── cover-1.jpg            # 封面1
-├── article-2.md           # 文章2
-└── cover-2.jpg            # 封面2
+├── hotspots.json          # 所有热点原始数据
+├── article-1.md           # 文章 1（含 Frontmatter）
+├── article-2.md           # 文章 2（含 Frontmatter）
+├── cover-1.jpg            # 封面 1
+├── cover-2.jpg            # 封面 2
+├── articles.json          # 生成元数据
+└── hotspots.json          # 热点数据
 ```
 
-## 配置
+## 性能指标
 
-编辑 `config/default.yaml`:
-
-```yaml
-# 搜索配置
-search:
-  sources:
-    - weibo
-    - xiaohongshu
-    - twitter
-    - bilibili
-    - xueqiu
-    - exa
-  max_results: 10
-
-# 文章生成
-article:
-  count: 2              # 每天生成文章数
-  min_word_count: 2500
-  max_word_count: 3500
-  theme: "pie"          # 发布主题
-
-# 定时任务
-cron:
-  enabled: true
-  schedule: "0 9 * * *"
-```
+| 环节 | 耗时 |
+|:---|:---|
+| 热点搜索 (5 渠道) | ~20 秒 |
+| AI 评估 | ~4.5 分钟 |
+| 并行文章生成 | ~3.3 分钟 |
+| 串行发布 | ~8 秒 |
+| **总计** | **~8 分钟** |
 
 ## 依赖
 
-- Agent Reach (已配置 12+ 渠道)
+- Agent Reach (12+ 渠道)
 - wechat-prompt-context (文章生成)
-- wechat-toolkit (发布)
-- wenyan-cli (公众号发布)
+- wechat-mp-publisher (公众号发布)
+- wenyan-cli (发布工具)
+- OpenClaw `creator` 笔杆子 agent
 
 ## 版本
 
-- **v2.1** - 2026-04-05
-  - 添加微博/知乎Cookie登录支持
-  - 优化AI分析：并发5个评估，10个热点，提速34%
-  - 文章生成：并行2篇，独立临时目录
-  - 发布：串行执行，避免API限流
-  - 封面：Pexels优先 + 豆包备选，修复YAML转义
-  - 修复发布超时问题（3秒→300秒优化到4秒）
-  
-- v2.0 - 全自动版本，支持5大平台搜索
-- v1.0 - 半自动版本，仅准备话题
+### v2.2.0 (2026-04-07)
+
+- ✅ 改用 `笔杆子 agent` 生成文章（`openclaw agent --agent creator`）
+- ✅ 新增 `filterAgentOutput()` 过滤 agent 思考过程
+- ✅ 全流程测试通过：2/2 生成并发布，无 SIGKILL
+- ✅ 新增端到端测试脚本 `test-agent-write.js`
+- ✅ 移除直接 API 调用逻辑，统一走 agent 框架
+
+### v2.1.0 (2026-04-05)
+
+- ✅ 添加微博/知乎 Cookie 登录支持
+- ✅ AI 评估并发优化（5 并发评估）
+- ✅ 文章生成并行化（独立临时目录）
+- ✅ 封面 Pexels 优先策略
+- ✅ YAML 转义修复
+
+### v2.0.0 (2026-04-04)
+
+- ✅ 修复 wenyan-cli 版本兼容
+- ✅ 添加自动确认模式（--auto）
+- ✅ 优化 5 维话题评估框架
+
+### v1.0.0 (2026-04-01)
+
+- 🎉 初始版本发布
