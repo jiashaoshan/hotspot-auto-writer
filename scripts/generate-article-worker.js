@@ -134,7 +134,13 @@ async function main() {
 6. 结构清晰，有小标题
 7. 结尾要有总结和行动建议
 
-请直接输出完整的Markdown格式文章内容（不需要frontmatter）。`;
+请直接输出完整的Markdown格式文章内容，包含YAML frontmatter（title、cover字段）。
+
+Frontmatter格式示例：
+---
+title: "文章标题"
+cover: "cover.jpg"
+---`;
     
     fs.writeFileSync(path.join(tmpDir, 'prompt.txt'), promptContent);
     
