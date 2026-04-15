@@ -158,11 +158,26 @@ async function main() {
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     
-    // 检查输出
-    const outputFile = path.join(tmpDir, 'output', 'article.md');
-    if (!fs.existsSync(outputFile)) {
-      throw new Error('未找到生成的文章文件');
+    // 检查输出 - 从 workspace-creator 读取 agent 生成的文件
+    const creatorWorkspace = path.join(process.env.HOME || '/Users/jiashaoshan', '.openclaw/workspace-creator');
+    
+    // 获取最新的 .md 文件（按修改时间排序）
+    const mdFiles = fs.readdirSync(creatorWorkspace)
+      .filter(f => f.endsWith('.md') && !f.startsWith('.'))
+      .map(f => ({
+        name: f,
+        path: path.join(creatorWorkspace, f),
+        mtime: fs.statSync(path.join(creatorWorkspace, f)).mtime
+      }))
+      .sort((a, b) => b.mtime - a.mtime);
+    
+    if (mdFiles.length === 0) {
+      throw new Error('未在 workspace-creator 找到生成的文章文件');
     }
+    
+    // 使用最新的文件（可能是这次生成的）
+    const outputFile = mdFiles[0].path;
+    console.log(`[Worker] 从 workspace-creator 读取文章: ${outputFile}`);
     
     let content = fs.readFileSync(outputFile, 'utf8');
     
@@ -193,9 +208,10 @@ async function main() {
     );
     fs.writeFileSync(finalArticlePath, content);
     
-    // 复制封面（支持多种位置和文件名）
+    // 复制封面（从 workspace-creator 搜索）
     let coverSrc = null;
     const searchDirs = [
+      creatorWorkspace,
       path.join(tmpDir, 'output'),
       path.join(tmpDir, 'scripts', 'output'),
       path.join(tmpDir, 'scripts', 'wai-scripts', 'output')
@@ -207,6 +223,7 @@ async function main() {
         const coverFile = files.find(f => f.startsWith('cover') && (f.endsWith('.jpg') || f.endsWith('.png')));
         if (coverFile) {
           coverSrc = path.join(searchDir, coverFile);
+          console.log(`[Worker] 找到封面: ${coverSrc}`);
           break;
         }
       }
