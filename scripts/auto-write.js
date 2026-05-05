@@ -4,11 +4,51 @@
  * 流程: Agent Reach 全渠道搜索 → AI筛选话题 → 调用 wechat-prompt-context → 生成并发布
  */
 
+// 强制 stdout 无缓冲，确保实时输出到飞书
+process.stdout._handle && process.stdout._handle.setBlocking && process.stdout._handle.setBlocking(true);
+
 const fs = require('fs');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
 const os = require('os');
 const crypto = require('crypto');
+
+// ===== 进度通知工具 =====
+function sendProgress(message) {
+  const timestamp = new Date().toLocaleTimeString();
+  const fullMessage = `📢 [${timestamp}] ${message}`;
+  console.log(`\n${fullMessage}\n`);
+  
+  // 强制刷新 stdout 缓冲区
+  if (process.stdout && process.stdout.write) {
+    process.stdout.write('');
+  }
+}
+
+// 使用 OpenClaw message 工具直接发送飞书消息（更可靠）
+function notifyFeishu(message) {
+  try {
+    // 尝试通过 OpenClaw CLI 发送消息到当前会话
+    const { exec } = require('child_process');
+    const chatId = process.env.OPENCLAW_CHAT_ID || process.env.FEISHU_CHAT_ID;
+    
+    if (chatId) {
+      exec(`openclaw message send --channel feishu --target "${chatId}" --message "${message.replace(/"/g, '\\"')}"`, 
+        { timeout: 5000 },
+        (err) => {
+          if (err) {
+            // 静默失败，不影响主流程
+            console.log(`[notify] ${message}`);
+          }
+        }
+      );
+    } else {
+      console.log(`[notify] ${message}`);
+    }
+  } catch (e) {
+    console.log(`[notify] ${message}`);
+  }
+}
 
 // 加载配置文件
 const config = require('../config/prompts.js');
@@ -404,52 +444,51 @@ async function fetchAllHotspots() {
     }
   } catch (e) { console.log('      ⚠️ 失败'); }
 
-  // 4. 小红书热门 - 使用 xhs-cli
+  // 4. 小红书热门 - 使用 redbook
   console.log('   📕 小红书热门...');
   try {
-    const result = run('xhs hot 2>/dev/null || xhs feed 2>/dev/null', 30000);
+    // 使用 redbook feed 获取热门内容（JSON格式）
+    const redbookCmd = process.env.REDBOOK_PATH || '~/.npm-global/bin/redbook';
+    const result = run(`${redbookCmd} feed --json 2>/dev/null`, 60000);
     if (result) {
-      // 尝试解析 YAML 格式
-      const lines = result.split('\n');
-      let inItems = false;
-      let currentItem = {};
-      let count = 0;
+      // 解析 JSON 格式
+      let data;
+      try {
+        data = JSON.parse(result);
+      } catch (e) {
+        // 尝试从输出中提取 JSON 部分
+        const jsonMatch = result.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          data = JSON.parse(jsonMatch[0]);
+        }
+      }
       
-      for (const line of lines) {
-        if (line.includes('items:')) inItems = true;
-        if (inItems && line.trim().startsWith('- id:')) {
-          if (currentItem.title && count < 8) {
+      if (data && data.items && Array.isArray(data.items)) {
+        let count = 0;
+        for (const item of data.items.slice(0, 10)) {
+          if (item.note_card && item.note_card.display_title && count < 8) {
+            const title = item.note_card.display_title;
+            const likes = item.note_card.interact_info?.liked_count || '0';
+            const hotNum = parseInt(likes.replace(/[^\d]/g, '')) || (80 - count * 5);
             allHotspots.push({
               platform: '小红书',
-              title: currentItem.title.slice(0, 50),
-              hot: currentItem.likes || 80 - count * 5,
+              title: String(title).slice(0, 50),
+              hot: hotNum,
               category: '热门笔记'
             });
             count++;
           }
-          currentItem = {};
         }
-        if (inItems && line.includes('title:')) {
-          const match = line.match(/title:\s*(.+)/);
-          if (match) currentItem.title = match[1].trim().replace(/^['"]|['"]$/g, '');
-        }
-        if (inItems && line.includes('likes:')) {
-          const match = line.match(/likes:\s*(\d+)/);
-          if (match) currentItem.likes = parseInt(match[1]);
-        }
+        console.log(`      ✅ ${count} 条`);
+      } else {
+        console.log('      ⚠️ 无数据或格式异常');
       }
-      if (currentItem.title && count < 8) {
-        allHotspots.push({
-          platform: '小红书',
-          title: currentItem.title.slice(0, 50),
-          hot: currentItem.likes || 50,
-          category: '热门笔记'
-        });
-        count++;
-      }
-      console.log(`      ✅ ${count} 条`);
+    } else {
+      console.log('      ⚠️ redbook 命令执行失败');
     }
-  } catch (e) { console.log('      ⚠️ 失败'); }
+  } catch (e) { 
+    console.log(`      ⚠️ 失败: ${e.message}`);
+  }
   
   // 5. Twitter 趋势 - 使用 twitter-cli feed
   console.log('   🐦 Twitter 趋势...');
@@ -763,7 +802,31 @@ function confirmWithUser(topics) {
   });
 }
 
-// ===== 步骤3: 调用 wechat-prompt-context 生成文章（并行版 - 临时目录隔离）=====
+// ===== 内存检测与并发控制 =====
+
+function getSystemMemoryInfo() {
+  const totalMemGB = os.totalmem() / 1024 / 1024 / 1024;
+  const freeMemGB = os.freemem() / 1024 / 1024 / 1024;
+  return {
+    totalGB: Math.round(totalMemGB * 10) / 10,
+    freeGB: Math.round(freeMemGB * 10) / 10,
+    isLowMemory: totalMemGB < 12, // 12GB 以下视为低内存
+    canParallel: totalMemGB >= 16 && freeMemGB >= 6 // 16GB+ 且空闲6GB+ 才允许并行
+  };
+}
+
+function getMemoryLimitMB() {
+  const memInfo = getSystemMemoryInfo();
+  if (memInfo.totalGB >= 16) {
+    return 1024; // 16GB+ → 1GB/进程
+  } else if (memInfo.totalGB >= 12) {
+    return 800; // 12GB → 800MB/进程
+  } else {
+    return 600; // 8GB → 600MB/进程（但会强制串行）
+  }
+}
+
+// ===== 步骤3: 调用 wechat-prompt-context 生成文章（智能串并行）=====
 
 async function generateArticles(topics) {
   console.log('\n📝 步骤3: 调用 wechat-prompt-context 生成文章\n');
@@ -781,30 +844,68 @@ async function generateArticles(topics) {
     return [];
   }
   
-  // 继续生成
-  console.log('\n✅ 继续生成文章（并行模式 - 临时目录隔离）...\n');
+  // 检测内存，决定串行还是并行
+  const memInfo = getSystemMemoryInfo();
+  console.log(`\n💾 系统内存检测: 总计 ${memInfo.totalGB}GB, 空闲 ${memInfo.freeGB}GB`);
   
   const today = new Date().toISOString().split('T')[0];
   const outputDir = path.join(__dirname, '../output', today);
   
-  // 使用独立工作进程并行生成文章（资源隔离，避免SIGKILL）
-  console.log('\n🚀 启动并行文章生成（工作进程模式）...\n');
+  let results = [];
   
+  if (memInfo.canParallel) {
+    // 内存充足，使用并行模式
+    console.log('\n✅ 内存充足，启用并行生成（2篇同时）...\n');
+    results = await generateArticlesParallel(topics.slice(0, 2), outputDir);
+  } else {
+    // 内存不足，使用串行模式
+    console.log('\n⚠️ 内存有限（<16GB），降级为串行生成（1篇接1篇）...\n');
+    console.log('   提示: 串行模式更稳定，总耗时约8-10分钟\n');
+    results = await generateArticlesSerial(topics.slice(0, 2), outputDir);
+  }
+  
+  // 等待所有工作进程完成
+  const successfulArticles = results.filter(r => r.success);
+  
+  console.log(`\n📊 文章生成结果: ${successfulArticles.length}/${results.length} 成功`);
+  results.forEach(r => {
+    if (r.success) {
+      console.log(`   ✅ [文章${r.rank}] ${r.wordCount}字 | ${r.duration}秒`);
+    } else {
+      console.log(`   ❌ [文章${r.rank}] ${r.error}`);
+    }
+  });
+  
+  // 保存结果
+  fs.writeFileSync(
+    path.join(outputDir, 'articles.json'),
+    JSON.stringify({ date: today, count: successfulArticles.length, articles: successfulArticles }, null, 2)
+  );
+  
+  return successfulArticles;
+}
+
+// 并行生成模式（内存充足时使用）
+async function generateArticlesParallel(topics, outputDir) {
   const workerPath = path.join(__dirname, 'generate-article-worker.js');
+  const memoryLimitMB = getMemoryLimitMB();
   const workers = [];
   
-  // 启动2个工作进程
-  for (const topic of topics.slice(0, 2)) {
+  console.log(`🚀 启动并行文章生成（内存限制: ${memoryLimitMB}MB/进程）...\n`);
+  
+  // 启动2个工作进程，带内存限制
+  for (const topic of topics) {
     console.log(`   [文章${topic.rank}] 启动工作进程: ${topic.title.slice(0, 40)}...`);
     
     const worker = spawn('node', [
+      `--max-old-space-size=${memoryLimitMB}`, // 内存限制
       workerPath,
       `--topic=${topic.title}`,
       `--type=${topic.articleType}`,
       `--rank=${topic.rank}`,
       `--output-dir=${outputDir}`
     ], {
-      detached: false, // 非分离模式，便于管理
+      detached: false,
       stdio: ['ignore', 'pipe', 'pipe']
     });
     
@@ -817,7 +918,7 @@ async function generateArticles(topics) {
   }
   
   // 收集所有工作进程结果
-  const results = await Promise.all(workers.map(w => new Promise((resolve) => {
+  return await Promise.all(workers.map(w => new Promise((resolve) => {
     w.process.stdout.on('data', (data) => {
       w.output += data.toString();
     });
@@ -842,27 +943,103 @@ async function generateArticles(topics) {
         });
       }
     });
+    
+    // 超时保护（10分钟）
+    setTimeout(() => {
+      if (w.process.exitCode === null) {
+        console.error(`   [文章${w.topic.rank}] ⚠️ 超时，强制终止`);
+        w.process.kill('SIGTERM');
+      }
+    }, 600000);
   })));
+}
+
+// 串行生成模式（内存不足时使用，更稳定）
+async function generateArticlesSerial(topics, outputDir) {
+  const workerPath = path.join(__dirname, 'generate-article-worker.js');
+  const memoryLimitMB = getMemoryLimitMB();
+  const results = [];
   
-  // 等待所有工作进程完成
-  const successfulArticles = results.filter(r => r.success);
+  console.log(`📝 启动串行文章生成（内存限制: ${memoryLimitMB}MB/进程）...\n`);
   
-  console.log(`\n📊 文章生成结果: ${successfulArticles.length}/${results.length} 成功（并行工作进程）`);
-  results.forEach(r => {
-    if (r.success) {
-      console.log(`   ✅ [文章${r.rank}] ${r.wordCount}字 | ${r.duration}秒`);
+  for (const topic of topics) {
+    console.log(`\n   [文章${topic.rank}] 开始生成: ${topic.title.slice(0, 40)}...`);
+    const startTime = Date.now();
+    
+    const worker = spawn('node', [
+      `--max-old-space-size=${memoryLimitMB}`, // 内存限制
+      workerPath,
+      `--topic=${topic.title}`,
+      `--type=${topic.articleType}`,
+      `--rank=${topic.rank}`,
+      `--output-dir=${outputDir}`
+    ], {
+      detached: false,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    
+    let output = '';
+    let errorOutput = '';
+    
+    const result = await new Promise((resolve) => {
+      worker.stdout.on('data', (data) => {
+        output += data.toString();
+        // 实时输出进度
+        const lines = data.toString().trim().split('\n');
+        lines.forEach(line => {
+          if (line.includes('✅') || line.includes('🎨') || line.includes('✍️')) {
+            console.log(`      ${line}`);
+          }
+        });
+      });
+      
+      worker.stderr.on('data', (data) => {
+        errorOutput += data.toString();
+      });
+      
+      worker.on('close', (code) => {
+        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+        try {
+          const lines = output.trim().split('\n');
+          const lastLine = lines[lines.length - 1];
+          const parsed = JSON.parse(lastLine);
+          parsed.duration = duration;
+          resolve(parsed);
+        } catch (e) {
+          resolve({
+            success: false,
+            rank: topic.rank,
+            topic: topic.title,
+            error: errorOutput || `进程退出码: ${code}`,
+            duration
+          });
+        }
+      });
+      
+      // 超时保护（10分钟）
+      setTimeout(() => {
+        if (worker.exitCode === null) {
+          console.error(`      ⚠️ 超时，强制终止`);
+          worker.kill('SIGTERM');
+        }
+      }, 600000);
+    });
+    
+    results.push(result);
+    
+    if (result.success) {
+      console.log(`   ✅ [文章${topic.rank}] 完成 | ${result.wordCount}字 | ${result.duration}秒`);
     } else {
-      console.log(`   ❌ [文章${r.rank}] ${r.error}`);
+      console.log(`   ❌ [文章${topic.rank}] 失败: ${result.error}`);
     }
-  });
+    
+    // 每篇完成后强制垃圾回收（如果可用）
+    if (global.gc) {
+      global.gc();
+    }
+  }
   
-  // 保存结果
-  fs.writeFileSync(
-    path.join(outputDir, 'articles.json'),
-    JSON.stringify({ date: today, count: successfulArticles.length, articles: successfulArticles }, null, 2)
-  );
-  
-  return successfulArticles;
+  return results;
 }
 
 // 生成提示词
@@ -1185,6 +1362,16 @@ async function main() {
   console.log('='.repeat(60));
   
   const totalStart = Date.now();
+  let currentStep = '启动';
+  
+  // 发送启动通知
+  sendProgress('🚀 热点自动写作任务启动！预计总耗时 10-12 分钟');
+  
+  // 启动心跳定时器（每2分钟发送一次"我还活着"）
+  const heartbeatInterval = setInterval(() => {
+    const elapsed = ((Date.now() - totalStart) / 1000 / 60).toFixed(1);
+    sendProgress(`💓 任务进行中... 当前步骤: ${currentStep} | 已运行 ${elapsed} 分钟`);
+  }, 120000); // 2分钟
   
   // 检查并自动安装 Playwright
   if (!checkPlaywright()) {
@@ -1196,28 +1383,53 @@ async function main() {
   }
   
   // 步骤1: 搜索
+  currentStep = '搜索热点';
+  sendProgress('📱 步骤 1/4：正在搜索全网热点（微博、知乎、B站、小红书、Twitter）...');
   startTimer('步骤1-热点搜索');
   const hotspots = await fetchAllHotspots();
   endTimer('步骤1-热点搜索');
+  sendProgress(`✅ 步骤 1/4 完成！共收集 ${hotspots.length} 条热点`);
   
   // 步骤2: 分析
+  currentStep = 'AI评估话题';
+  sendProgress('🤖 步骤 2/4：AI 正在评估热点，选出最佳话题...');
   startTimer('步骤2-AI分析');
   const topics = await analyzeAndSelect(hotspots);
   endTimer('步骤2-AI分析');
+  sendProgress(`✅ 步骤 2/4 完成！选出 ${topics.length} 个话题：${topics.map(t => t.title.slice(0, 20)).join('、')}...`);
   
   // 步骤3: 生成文章
+  currentStep = '生成文章（约5-8分钟）';
+  sendProgress('✍️ 步骤 3/4：正在生成文章（根据内存自动选择串行/并行模式）...');
   startTimer('步骤3-文章生成(并行)');
   const articles = await generateArticles(topics);
   endTimer('步骤3-文章生成(并行)');
+  const successCount = articles.filter(a => a.success).length;
+  sendProgress(`✅ 步骤 3/4 完成！成功生成 ${successCount}/${articles.length} 篇文章`);
   
   // 步骤4: 发布
   if (articles.length > 0) {
+    currentStep = '发布到公众号';
+    sendProgress('📤 步骤 4/4：正在发布到微信公众号草稿箱...');
     startTimer('步骤4-发布(串行)');
     await publishArticles(articles);
     endTimer('步骤4-发布(串行)');
   }
   
+  // 停止心跳
+  clearInterval(heartbeatInterval);
+  
   const totalDuration = ((Date.now() - totalStart) / 1000 / 60).toFixed(1);
+  
+  // 发送完成通知
+  const successArticles = articles.filter(a => a.success);
+  if (successArticles.length > 0) {
+    const titles = successArticles.map(a => `「${(a.title || a.topic || '未命名').slice(0, 15)}...」`).join('\n   ');
+    sendProgress(`🎉 全部完成！总耗时 ${totalDuration} 分钟\n\n📊 成功生成 ${successArticles.length} 篇文章：\n   ${titles}\n\n📱 请前往微信公众号后台草稿箱查看`);
+  } else {
+    sendProgress(`⚠️ 任务完成，但文章生成失败，请检查日志`);
+  }
+  
   console.log('\n' + '='.repeat(60));
   console.log(`✅ 完成！总耗时 ${totalDuration} 分钟`);
   console.log(`📊 生成 ${articles.length} 篇文章`);

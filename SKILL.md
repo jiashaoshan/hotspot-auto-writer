@@ -51,9 +51,37 @@ metadata:
 |------|------|----------|------|--------|
 | 1 | 微博 | 热搜榜 | ✅ | ✅ 已配置 |
 | 2 | 知乎 | 热榜 | ✅ | ✅ 已配置 |
-| 3 | 小红书 | 热门笔记 | ✅ | - |
+| 3 | 小红书 | 热门笔记 | ✅ | ✅ 已配置 |
 | 4 | B站 | 热门视频 | ✅ | - |
 | 5 | Twitter/X | 趋势话题 | ✅ | - |
+
+## 渠道配置详情
+
+### 小红书热门 (redbook)
+
+使用 `@lucasygu/redbook` CLI 工具获取小红书热门内容。
+
+**安装:**
+```bash
+npm install -g @lucasygu/redbook
+```
+
+**验证连接:**
+```bash
+~/.npm-global/bin/redbook whoami
+```
+
+**环境变量（可选）:**
+如果 redbook 安装在非标准路径，可设置环境变量：
+```bash
+export REDBOOK_PATH=/path/to/redbook
+```
+
+**说明:**
+- 自动从 Chrome 浏览器读取 Cookie，无需手动配置
+- 请确保已在 Chrome 中登录 xiaohongshu.com
+- 使用 `redbook feed --json` 获取热门推荐流
+- 支持解析点赞数作为热度指标
 
 ## 使用方法
 
